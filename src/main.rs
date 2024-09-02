@@ -1,4 +1,8 @@
 use aes::cipher::{BlockEncrypt, KeyInit};
+use aes_gcm::{
+    aead::{AeadMut, AeadMutInPlace},
+    Aes128Gcm,
+};
 use anyhow::Result;
 use hex_literal::hex;
 use hkdf::Hkdf;
@@ -28,8 +32,8 @@ fn main() -> Result<()> {
 
     let initial_salt = hex!("38762cf7f55934b34d179ae6a4c80cadccbb7f0a");
     let client_in = hex!("00200f746c73313320636c69656e7420696e00");
-    //let quic_key = hex!("00100e746c7331332071756963206b657900");
-    //let quic_iv = hex!("000c0d746c733133207175696320697600");
+    let quic_key = hex!("00100e746c7331332071756963206b657900");
+    let quic_iv = hex!("000c0d746c733133207175696320697600");
     let quic_hp = hex!("00100d746c733133207175696320687000");
 
     let hk = Hkdf::<Sha256>::new(Some(&initial_salt), &dcid);
@@ -38,6 +42,14 @@ fn main() -> Result<()> {
     println!("client_initial_secret: {client_initial_secret:02X?}");
 
     let hk = Hkdf::<Sha256>::from_prk(&client_initial_secret).unwrap();
+    let mut quic_hp_key = [0; 16];
+    hk.expand(&quic_key, &mut quic_hp_key).unwrap();
+    println!("quic_hp_key: {quic_hp_key:02X?}");
+
+    let mut quic_hp_iv = [0; 12];
+    hk.expand(&quic_iv, &mut quic_hp_iv).unwrap();
+    println!("quic_hp_iv: {quic_hp_iv:02X?}");
+
     let mut quic_hp_secret = [0; 16];
     hk.expand(&quic_hp, &mut quic_hp_secret).unwrap();
     println!("quic_hp_secret: {quic_hp_secret:02X?}");
@@ -49,8 +61,33 @@ fn main() -> Result<()> {
 
     let mut block = aes::Block::from_mut_slice(&mut dsa);
     cipher.encrypt_block(&mut block);
-    let mask = &block[..4];
+    let mask = &block[..5];
     println!("mask: {mask:02X?}");
+
+    let header = &mut payload.clone()[0..22];
+    header[0] ^= mask[0] & 0x0f;
+    header[18] ^= mask[1];
+    header[19] ^= mask[2];
+    header[20] ^= mask[3];
+    header[21] ^= mask[4];
+
+    println!("{header:02X?}");
+    let packet_number_len = (header[0] & 0b00000011) as usize + 1;
+    offset += packet_number_len; // payload starts here
+
+    let mut i = 0;
+    while i < packet_number_len {
+        println!("{:02X?}", header[header.len() - i - 1]);
+        quic_hp_iv[quic_hp_iv.len() - i - 1] ^= header[header.len() - i - 1];
+        i += 1;
+    }
+
+    println!("nonce: {:02X?}", &quic_hp_iv);
+    let mut cipher = Aes128Gcm::new_from_slice(&quic_hp_key)?;
+
+    let mut buf = payload[offset..].to_vec();
+    cipher.decrypt_in_place(&quic_hp_iv.try_into()?, &header, &mut buf).unwrap();
+    println!("payload: {:02X?}", &buf);
 
     /*
     let mut buf = [0; 32];
