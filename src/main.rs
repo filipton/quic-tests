@@ -1,10 +1,33 @@
+use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyInit};
 use anyhow::Result;
 use s2n_quic_core::crypto::{HeaderKey, InitialKey as _, Key};
 use s2n_quic_crypto::initial::InitialKey;
 
+type Aes128EcbDec = ecb::Decryptor<aes::Aes128>;
+
 fn main() -> Result<()> {
-    let dcid = [0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08]; // read from packet
     let mut payload = hex::decode(std::fs::read_to_string("./encrypted-packet.txt")?.trim())?;
+    let dest_conn_len = payload[5] as usize;
+    let dcid = &payload[6..6 + dest_conn_len];
+    println!("dcid: {dcid:02X?}");
+
+    let mut offset = 6 + dest_conn_len;
+    let src_conn_len = payload[offset] as usize;
+    offset += src_conn_len + 1;
+
+    let token_len = payload[offset] as usize;
+    offset += token_len + 1;
+
+    let payload_len: u16 = u16::from_be_bytes([payload[offset], payload[offset + 1]]) & 0x0fff;
+    println!("payload_len: {payload_len}");
+    offset += 2; // we are on packet_number, but we dont know its length
+
+    /*
+    let mut buf = [0; 100];
+    let pt = Aes128EcbDec::new(&key.into())
+        .decrypt_padded_mut::<Pkcs7>(&mut buf)
+        .unwrap();
+    */
 
     let (key, header) = InitialKey::new_server(&dcid);
     println!("sample {:02X?}", &payload[22..38]);
@@ -21,7 +44,7 @@ fn main() -> Result<()> {
     println!("{header:02X?}");
 
     let mut payload = &mut payload[22..];
-    key.decrypt(2, &header, &mut payload).unwrap();
+    key.decrypt(0, &header, &mut payload).unwrap();
 
     println!("{payload:02X?}");
 
