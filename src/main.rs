@@ -1,20 +1,13 @@
-use ::hkdf::Hkdf;
-use aes::cipher::{
-    block_padding::{NoPadding, Pkcs7},
-    BlockDecryptMut, BlockEncryptMut, KeyInit,
-};
+use aes::cipher::{BlockEncrypt, KeyInit};
 use anyhow::Result;
 use hex_literal::hex;
-//use hkdf::Hkdf;
-use ring::{aead::AES_128_GCM, hkdf, hmac};
-use s2n_quic_core::crypto::{HeaderKey, InitialKey as _, Key};
-use s2n_quic_crypto::initial::InitialKey;
+use hkdf::Hkdf;
 use sha2::Sha256;
-
-type Aes128EcbDec = ecb::Decryptor<aes::Aes128>;
+//use s2n_quic_core::crypto::{HeaderKey, InitialKey as _, Key};
+//use s2n_quic_crypto::initial::InitialKey;
 
 fn main() -> Result<()> {
-    let mut payload = hex::decode(std::fs::read_to_string("./encrypted-packet.txt")?.trim())?;
+    let payload = hex::decode(std::fs::read_to_string("./encrypted-packet.txt")?.trim())?;
     let dest_conn_len = payload[5] as usize;
     let dcid = &payload[6..6 + dest_conn_len];
     println!("dcid: {dcid:02X?}");
@@ -49,6 +42,25 @@ fn main() -> Result<()> {
     hk.expand(&quic_hp, &mut quic_hp_secret).unwrap();
     println!("quic_hp_secret: {quic_hp_secret:02X?}");
 
+    let cipher = aes::Aes128::new_from_slice(&quic_hp_secret).unwrap();
+    //cipher.encrypt_padded::<block_padding::NoPadding>(&sample, size);
+    let mut dsa = [0; 16];
+    dsa.clone_from_slice(&sample);
+
+    let mut block = aes::Block::from_mut_slice(&mut dsa);
+    cipher.encrypt_block(&mut block);
+    let mask = &block[..4];
+    println!("mask: {mask:02X?}");
+
+    /*
+    let mut buf = [0; 32];
+    buf.copy_from_slice(&sample);
+    let pt = Aes128EcbDec::new(&quic_hp_secret.try_into()?)
+        .decrypt_padded_mut::<Pkcs7>(&mut buf)
+        .unwrap();
+
+    */
+
     /*
     let mut client_initial_secret = [0; 32];
     let hk = Hkdf::<Sha256>::new(Some(&initial_salt), &dcid);
@@ -60,14 +72,6 @@ fn main() -> Result<()> {
     hk.expand(&quic_key, &mut quic_hp_secret).unwrap();
     println!("quic_hp_secret: {quic_hp_secret:02X?}");
 
-    let mut buf = [0; 16];
-    buf.copy_from_slice(&sample);
-    let pt = Aes128EcbDec::new(&quic_hp_secret.try_into()?)
-        .decrypt_padded_mut::<NoPadding>(&mut buf)
-        .unwrap();
-
-    let mask = &pt[..4];
-    println!("mask: {mask:02X?}");
     */
 
     /*
