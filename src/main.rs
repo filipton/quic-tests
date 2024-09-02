@@ -11,7 +11,7 @@ use sha2::Sha256;
 //use s2n_quic_crypto::initial::InitialKey;
 
 fn main() -> Result<()> {
-    let payload = hex::decode(std::fs::read_to_string("./encrypted-packet.txt")?.trim())?;
+    let mut payload = hex::decode(std::fs::read_to_string("./encrypted-packet.txt")?.trim())?;
     let dest_conn_len = payload[5] as usize;
     let dcid = &payload[6..6 + dest_conn_len];
     println!("dcid: {dcid:02X?}");
@@ -55,7 +55,6 @@ fn main() -> Result<()> {
     println!("quic_hp_secret: {quic_hp_secret:02X?}");
 
     let cipher = aes::Aes128::new_from_slice(&quic_hp_secret).unwrap();
-    //cipher.encrypt_padded::<block_padding::NoPadding>(&sample, size);
     let mut dsa = [0; 16];
     dsa.clone_from_slice(&sample);
 
@@ -64,20 +63,21 @@ fn main() -> Result<()> {
     let mask = &block[..5];
     println!("mask: {mask:02X?}");
 
-    let header = &mut payload.clone()[0..22];
-    header[0] ^= mask[0] & 0x0f;
-    header[18] ^= mask[1];
-    header[19] ^= mask[2];
-    header[20] ^= mask[3];
-    header[21] ^= mask[4];
+    payload[0] ^= mask[0] & 0x0f;
+    let packet_number_len = (payload[0] & 0b00000011) as usize + 1;
+    offset += packet_number_len; // payload starts here
+
+    let header = &mut payload.clone()[0..offset];
+    let mut mask_i = 1;
+    for i in 18..(22.min(header.len())) {
+        header[i] ^= mask[mask_i];
+        mask_i += 1;
+    }
 
     println!("{header:02X?}");
-    let packet_number_len = (header[0] & 0b00000011) as usize + 1;
-    offset += packet_number_len; // payload starts here
 
     let mut i = 0;
     while i < packet_number_len {
-        println!("{:02X?}", header[header.len() - i - 1]);
         quic_hp_iv[quic_hp_iv.len() - i - 1] ^= header[header.len() - i - 1];
         i += 1;
     }
@@ -86,8 +86,18 @@ fn main() -> Result<()> {
     let mut cipher = Aes128Gcm::new_from_slice(&quic_hp_key)?;
 
     let mut buf = payload[offset..].to_vec();
-    cipher.decrypt_in_place(&quic_hp_iv.try_into()?, &header, &mut buf).unwrap();
+    cipher
+        .decrypt_in_place(&quic_hp_iv.try_into()?, &header, &mut buf)
+        .unwrap();
     println!("payload: {:02X?}", &buf);
+
+    let frame_type = buf[0];
+    let offset = buf[1];
+    let length: u16 = u16::from_be_bytes([buf[2], buf[3]]) & 0x0fff;
+
+    println!("frame_type: {frame_type:016X?}");
+    println!("offset: {offset}");
+    println!("length: {length}");
 
     /*
     let mut buf = [0; 32];
