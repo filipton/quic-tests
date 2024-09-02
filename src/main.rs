@@ -1,7 +1,14 @@
-use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyInit};
+use aes::cipher::{
+    block_padding::{NoPadding, Pkcs7},
+    BlockDecryptMut, BlockEncryptMut, KeyInit,
+};
 use anyhow::Result;
+use hex_literal::hex;
+//use hkdf::Hkdf;
+use ring::{aead::AES_128_GCM, hkdf, hmac};
 use s2n_quic_core::crypto::{HeaderKey, InitialKey as _, Key};
 use s2n_quic_crypto::initial::InitialKey;
+use sha2::Sha256;
 
 type Aes128EcbDec = ecb::Decryptor<aes::Aes128>;
 
@@ -22,17 +29,46 @@ fn main() -> Result<()> {
     println!("payload_len: {payload_len}");
     offset += 2; // we are on packet_number, but we dont know its length
 
+    let sample = &payload[(offset + 4)..(offset + 20)];
+    println!("sample: {:02X?}", &sample);
+
+    let initial_salt = hex!("38762cf7f55934b34d179ae6a4c80cadccbb7f0a");
+    let client_in = hex!("00200f746c73313320636c69656e7420696e00");
+    let quic_key = hex!("00100e746c7331332071756963206b657900");
+    let quic_iv = hex!("000c0d746c733133207175696320697600");
+    let quic_hp = hex!("00100d746c733133207175696320687000");
+
+    let salt = hmac::Key::new(hmac::HMAC_SHA256, &initial_salt);
+    let initial_secret = hkdf::Salt::new(ring::hkdf::HKDF_SHA256, &initial_salt).extract(&dcid);
+
+    let client_initial_secret = derive_secret(&initial_secret, &client_in, &[], 32).unwrap();
+    println!("client_initial_secret: {client_initial_secret:02X?}");
+
     /*
-    let mut buf = [0; 100];
-    let pt = Aes128EcbDec::new(&key.into())
-        .decrypt_padded_mut::<Pkcs7>(&mut buf)
+    let mut client_initial_secret = [0; 32];
+    let hk = Hkdf::<Sha256>::new(Some(&initial_salt), &dcid);
+    hk.expand(&client_in, &mut client_initial_secret).unwrap();
+    println!("client_initial_secret: {client_initial_secret:02X?}");
+
+    let mut quic_hp_secret = [0; 16];
+    let hk = Hkdf::<Sha256>::new(Some(&client_initial_secret), &[]);
+    hk.expand(&quic_key, &mut quic_hp_secret).unwrap();
+    println!("quic_hp_secret: {quic_hp_secret:02X?}");
+
+    let mut buf = [0; 16];
+    buf.copy_from_slice(&sample);
+    let pt = Aes128EcbDec::new(&quic_hp_secret.try_into()?)
+        .decrypt_padded_mut::<NoPadding>(&mut buf)
         .unwrap();
+
+    let mask = &pt[..4];
+    println!("mask: {mask:02X?}");
     */
 
+    /*
     let (key, header) = InitialKey::new_server(&dcid);
-    println!("sample {:02X?}", &payload[22..38]);
-    let mask = header.opening_header_protection_mask(&payload[22..38]);
-    println!("mask {mask:02X?}");
+    let mask = header.opening_header_protection_mask(sample);
+    println!("mask: {mask:02X?}");
 
     let header = &mut payload.clone()[0..22];
     header[0] ^= mask[0] & 0x0f;
@@ -47,24 +83,6 @@ fn main() -> Result<()> {
     key.decrypt(0, &header, &mut payload).unwrap();
 
     println!("{payload:02X?}");
-
-    /*
-    let initial_salt = [
-        0x38, 0x76, 0x2c, 0xf7, 0xf5, 0x59, 0x34, 0xb3, 0x4d, 0x17, 0x9a, 0xe6, 0xa4, 0xc8, 0x0c,
-        0xad, 0xcc, 0xbb, 0x7f, 0x0a,
-    ];
-
-    let client_in = [
-        0x00, 0x20, 0x0f, 0x74, 0x6c, 0x73, 0x31, 0x33, 0x20, 0x63, 0x6c, 0x69, 0x65, 0x6e, 0x74,
-        0x20, 0x69, 0x6e, 0x00,
-    ];
-
-    let hk = Hkdf::<Sha256>::new(Some(&initial_salt), &dcid);
-
-    let mut client_initial_secret = [0; 32];
-    hk.expand(&client_in, &mut client_initial_secret).unwrap();
-
-    println!("{client_initial_secret:02X?}");
     */
 
     // test quic parsing
@@ -73,4 +91,18 @@ fn main() -> Result<()> {
     //println!("{packet_header:?}");
 
     Ok(())
+}
+
+fn derive_secret(
+    secret: &hkdf::Prk,
+    label: &[u8],
+    context: &[u8],
+    len: usize,
+) -> Result<Vec<u8>, ring::error::Unspecified> {
+    let d = [label, context];
+    let res = secret.expand(&d, &AES_128_GCM)?;
+    let mut buf = vec![0u8; len];
+    res.fill(&mut buf)?;
+
+    Ok(buf)
 }
