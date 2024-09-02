@@ -1,0 +1,11 @@
+[package]
+name = "quic-tests"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.86"
+hex = "0.4.3"
+s2n-quic-core = "0.45.0"
+s2n-quic-crypto = "0.45.0"
+hkdf = "0.12.4"
