@@ -1,3 +1,4 @@
+use ::hkdf::Hkdf;
 use aes::cipher::{
     block_padding::{NoPadding, Pkcs7},
     BlockDecryptMut, BlockEncryptMut, KeyInit,
@@ -34,15 +35,19 @@ fn main() -> Result<()> {
 
     let initial_salt = hex!("38762cf7f55934b34d179ae6a4c80cadccbb7f0a");
     let client_in = hex!("00200f746c73313320636c69656e7420696e00");
-    let quic_key = hex!("00100e746c7331332071756963206b657900");
-    let quic_iv = hex!("000c0d746c733133207175696320697600");
+    //let quic_key = hex!("00100e746c7331332071756963206b657900");
+    //let quic_iv = hex!("000c0d746c733133207175696320697600");
     let quic_hp = hex!("00100d746c733133207175696320687000");
 
-    let salt = hmac::Key::new(hmac::HMAC_SHA256, &initial_salt);
-    let initial_secret = hkdf::Salt::new(ring::hkdf::HKDF_SHA256, &initial_salt).extract(&dcid);
-
-    let client_initial_secret = derive_secret(&initial_secret, &client_in, &[], 32).unwrap();
+    let hk = Hkdf::<Sha256>::new(Some(&initial_salt), &dcid);
+    let mut client_initial_secret = [0; 32];
+    hk.expand(&client_in, &mut client_initial_secret).unwrap();
     println!("client_initial_secret: {client_initial_secret:02X?}");
+
+    let hk = Hkdf::<Sha256>::from_prk(&client_initial_secret).unwrap();
+    let mut quic_hp_secret = [0; 16];
+    hk.expand(&quic_hp, &mut quic_hp_secret).unwrap();
+    println!("quic_hp_secret: {quic_hp_secret:02X?}");
 
     /*
     let mut client_initial_secret = [0; 32];
@@ -50,8 +55,8 @@ fn main() -> Result<()> {
     hk.expand(&client_in, &mut client_initial_secret).unwrap();
     println!("client_initial_secret: {client_initial_secret:02X?}");
 
-    let mut quic_hp_secret = [0; 16];
     let hk = Hkdf::<Sha256>::new(Some(&client_initial_secret), &[]);
+    let mut quic_hp_secret = [0; 16];
     hk.expand(&quic_key, &mut quic_hp_secret).unwrap();
     println!("quic_hp_secret: {quic_hp_secret:02X?}");
 
@@ -91,18 +96,4 @@ fn main() -> Result<()> {
     //println!("{packet_header:?}");
 
     Ok(())
-}
-
-fn derive_secret(
-    secret: &hkdf::Prk,
-    label: &[u8],
-    context: &[u8],
-    len: usize,
-) -> Result<Vec<u8>, ring::error::Unspecified> {
-    let d = [label, context];
-    let res = secret.expand(&d, &AES_128_GCM)?;
-    let mut buf = vec![0u8; len];
-    res.fill(&mut buf)?;
-
-    Ok(buf)
 }
