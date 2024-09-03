@@ -11,7 +11,16 @@ const QUIC_KEY: [u8; 18] = hex!("00100e746c7331332071756963206b657900");
 const QUIC_IV: [u8; 17] = hex!("000c0d746c733133207175696320697600");
 const QUIC_HP: [u8; 17] = hex!("00100d746c733133207175696320687000");
 
-pub fn parse_quic_frame<'a>(data: &'a mut [u8]) -> Option<(u8, u8, usize, Vec<u8>)> {
+#[derive(Debug)]
+pub struct QuicFrameData {
+    pub frame_type: u8,
+    pub offset: u8,
+    pub length: usize,
+    pub decoded_frame: Vec<u8>,
+}
+
+pub fn parse_quic_frame(data: &[u8]) -> Option<QuicFrameData> {
+    let mut data = data.to_vec();
     let dest_conn_len = *data.get(5)? as usize;
     let dcid = data.get(6..6 + dest_conn_len)?;
 
@@ -27,19 +36,19 @@ pub fn parse_quic_frame<'a>(data: &'a mut [u8]) -> Option<(u8, u8, usize, Vec<u8
 
     let hk = Hkdf::<Sha256>::new(Some(&INITIAL_SALT), &dcid);
     let mut client_initial_secret = [0; 32];
-    hk.expand(&CLIENT_IN, &mut client_initial_secret).unwrap();
+    hk.expand(&CLIENT_IN, &mut client_initial_secret).ok()?;
 
-    let hk = Hkdf::<Sha256>::from_prk(&client_initial_secret).unwrap();
+    let hk = Hkdf::<Sha256>::from_prk(&client_initial_secret).ok()?;
     let mut quic_hp_key = [0; 16];
-    hk.expand(&QUIC_KEY, &mut quic_hp_key).unwrap();
+    hk.expand(&QUIC_KEY, &mut quic_hp_key).ok()?;
 
     let mut quic_hp_iv = [0; 12];
-    hk.expand(&QUIC_IV, &mut quic_hp_iv).unwrap();
+    hk.expand(&QUIC_IV, &mut quic_hp_iv).ok()?;
 
     let mut quic_hp_secret = [0; 16];
-    hk.expand(&QUIC_HP, &mut quic_hp_secret).unwrap();
+    hk.expand(&QUIC_HP, &mut quic_hp_secret).ok()?;
 
-    let cipher = aes::Aes128::new_from_slice(&quic_hp_secret).unwrap();
+    let cipher = aes::Aes128::new_from_slice(&quic_hp_secret).ok()?;
     let mut sample = data.get((offset + 4)..(offset + 20))?.to_vec();
     let mut block = aes::Block::from_mut_slice(&mut sample);
     cipher.encrypt_block(&mut block);
@@ -66,17 +75,23 @@ pub fn parse_quic_frame<'a>(data: &'a mut [u8]) -> Option<(u8, u8, usize, Vec<u8
     let mut cipher = Aes128Gcm::new_from_slice(&quic_hp_key).ok()?;
     cipher
         .decrypt_in_place(&quic_hp_iv.try_into().ok()?, &header, &mut packet_data)
-        .unwrap();
+        .ok()?;
 
     let frame_type = packet_data[0];
     let offset = packet_data[1];
     let length = (u16::from_be_bytes([packet_data[2], packet_data[3]]) & 0x0fff) as usize;
 
-    Some((frame_type, offset, length, packet_data))
+    packet_data.drain(0..4);
+    Some(QuicFrameData {
+        frame_type,
+        offset,
+        length,
+        decoded_frame: packet_data,
+    })
 }
 
 fn main() -> Result<()> {
-    let mut payload = hex::decode(std::fs::read_to_string("./encrypted-packet.txt")?.trim())?;
-    println!("{:02X?}", parse_quic_frame(&mut payload));
+    let payload = hex::decode(std::fs::read_to_string("./encrypted-packet.txt")?.trim())?;
+    println!("{:02X?}", parse_quic_frame(&payload));
     Ok(())
 }
