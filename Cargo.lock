@@ -203,16 +203,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "quic-tests"
+name = "qls-proto-utils"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eef7ed1f8a91729bbfd1b1e128f7ec2cd6fd0c5d1e64f86f66143e6b4c794439"
 dependencies = [
  "aes",
  "aes-gcm",
- "anyhow",
  "hex",
  "hex-literal",
  "hkdf",
  "sha2",
+]
+
+[[package]]
+name = "quic-tests"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "qls-proto-utils",
 ]
 
 [[package]]
