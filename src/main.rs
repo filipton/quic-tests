@@ -1,80 +1,61 @@
 use aes::cipher::{BlockEncrypt, KeyInit};
-use aes_gcm::{
-    aead::{AeadMut, AeadMutInPlace},
-    Aes128Gcm,
-};
+use aes_gcm::{aead::AeadMutInPlace, Aes128Gcm};
 use anyhow::Result;
 use hex_literal::hex;
 use hkdf::Hkdf;
 use sha2::Sha256;
-//use s2n_quic_core::crypto::{HeaderKey, InitialKey as _, Key};
-//use s2n_quic_crypto::initial::InitialKey;
 
-fn main() -> Result<()> {
-    let mut payload = hex::decode(std::fs::read_to_string("./encrypted-packet.txt")?.trim())?;
-    let dest_conn_len = payload[5] as usize;
-    let dcid = &payload[6..6 + dest_conn_len];
-    println!("dcid: {dcid:02X?}");
+const INITIAL_SALT: [u8; 20] = hex!("38762cf7f55934b34d179ae6a4c80cadccbb7f0a");
+const CLIENT_IN: [u8; 19] = hex!("00200f746c73313320636c69656e7420696e00");
+const QUIC_KEY: [u8; 18] = hex!("00100e746c7331332071756963206b657900");
+const QUIC_IV: [u8; 17] = hex!("000c0d746c733133207175696320697600");
+const QUIC_HP: [u8; 17] = hex!("00100d746c733133207175696320687000");
+
+pub fn parse_quic_frame<'a>(data: &'a mut [u8]) -> Option<(u8, u8, usize, Vec<u8>)> {
+    let dest_conn_len = *data.get(5)? as usize;
+    let dcid = data.get(6..6 + dest_conn_len)?;
 
     let mut offset = 6 + dest_conn_len;
-    let src_conn_len = payload[offset] as usize;
+    let src_conn_len = *data.get(offset)? as usize;
     offset += src_conn_len + 1;
 
-    let token_len = payload[offset] as usize;
+    let token_len = *data.get(offset)? as usize;
     offset += token_len + 1;
 
-    let payload_len: u16 = u16::from_be_bytes([payload[offset], payload[offset + 1]]) & 0x0fff;
-    println!("payload_len: {payload_len}");
-    offset += 2; // we are on packet_number, but we dont know its length
+    //let payload_len = u16::from_be_bytes([*data.get(offset)?, *data.get(offset + 1)?]) & 0x0fff;
+    offset += 2;
 
-    let sample = &payload[(offset + 4)..(offset + 20)];
-    println!("sample: {:02X?}", &sample);
-
-    let initial_salt = hex!("38762cf7f55934b34d179ae6a4c80cadccbb7f0a");
-    let client_in = hex!("00200f746c73313320636c69656e7420696e00");
-    let quic_key = hex!("00100e746c7331332071756963206b657900");
-    let quic_iv = hex!("000c0d746c733133207175696320697600");
-    let quic_hp = hex!("00100d746c733133207175696320687000");
-
-    let hk = Hkdf::<Sha256>::new(Some(&initial_salt), &dcid);
+    let hk = Hkdf::<Sha256>::new(Some(&INITIAL_SALT), &dcid);
     let mut client_initial_secret = [0; 32];
-    hk.expand(&client_in, &mut client_initial_secret).unwrap();
-    println!("client_initial_secret: {client_initial_secret:02X?}");
+    hk.expand(&CLIENT_IN, &mut client_initial_secret).unwrap();
 
     let hk = Hkdf::<Sha256>::from_prk(&client_initial_secret).unwrap();
     let mut quic_hp_key = [0; 16];
-    hk.expand(&quic_key, &mut quic_hp_key).unwrap();
-    println!("quic_hp_key: {quic_hp_key:02X?}");
+    hk.expand(&QUIC_KEY, &mut quic_hp_key).unwrap();
 
     let mut quic_hp_iv = [0; 12];
-    hk.expand(&quic_iv, &mut quic_hp_iv).unwrap();
-    println!("quic_hp_iv: {quic_hp_iv:02X?}");
+    hk.expand(&QUIC_IV, &mut quic_hp_iv).unwrap();
 
     let mut quic_hp_secret = [0; 16];
-    hk.expand(&quic_hp, &mut quic_hp_secret).unwrap();
-    println!("quic_hp_secret: {quic_hp_secret:02X?}");
+    hk.expand(&QUIC_HP, &mut quic_hp_secret).unwrap();
 
     let cipher = aes::Aes128::new_from_slice(&quic_hp_secret).unwrap();
-    let mut dsa = [0; 16];
-    dsa.clone_from_slice(&sample);
-
-    let mut block = aes::Block::from_mut_slice(&mut dsa);
+    let mut sample = data.get((offset + 4)..(offset + 20))?.to_vec();
+    let mut block = aes::Block::from_mut_slice(&mut sample);
     cipher.encrypt_block(&mut block);
     let mask = &block[..5];
-    println!("mask: {mask:02X?}");
 
-    payload[0] ^= mask[0] & 0x0f;
-    let packet_number_len = (payload[0] & 0b00000011) as usize + 1;
+    data[0] ^= mask[0] & 0x0f;
+    let packet_number_len = (data[0] & 0b00000011) as usize + 1;
     offset += packet_number_len; // payload starts here
+    let mut packet_data = Vec::from(&data[offset..]);
 
-    let header = &mut payload.clone()[0..offset];
+    let header = data.get_mut(0..offset)?;
     let mut mask_i = 1;
     for i in 18..(22.min(header.len())) {
         header[i] ^= mask[mask_i];
         mask_i += 1;
     }
-
-    println!("{header:02X?}");
 
     let mut i = 0;
     while i < packet_number_len {
@@ -82,69 +63,20 @@ fn main() -> Result<()> {
         i += 1;
     }
 
-    println!("nonce: {:02X?}", &quic_hp_iv);
-    let mut cipher = Aes128Gcm::new_from_slice(&quic_hp_key)?;
-
-    let mut buf = payload[offset..].to_vec();
+    let mut cipher = Aes128Gcm::new_from_slice(&quic_hp_key).ok()?;
     cipher
-        .decrypt_in_place(&quic_hp_iv.try_into()?, &header, &mut buf)
-        .unwrap();
-    println!("payload: {:02X?}", &buf);
-
-    let frame_type = buf[0];
-    let offset = buf[1];
-    let length: u16 = u16::from_be_bytes([buf[2], buf[3]]) & 0x0fff;
-
-    println!("frame_type: {frame_type:016X?}");
-    println!("offset: {offset}");
-    println!("length: {length}");
-
-    /*
-    let mut buf = [0; 32];
-    buf.copy_from_slice(&sample);
-    let pt = Aes128EcbDec::new(&quic_hp_secret.try_into()?)
-        .decrypt_padded_mut::<Pkcs7>(&mut buf)
+        .decrypt_in_place(&quic_hp_iv.try_into().ok()?, &header, &mut packet_data)
         .unwrap();
 
-    */
+    let frame_type = packet_data[0];
+    let offset = packet_data[1];
+    let length = (u16::from_be_bytes([packet_data[2], packet_data[3]]) & 0x0fff) as usize;
 
-    /*
-    let mut client_initial_secret = [0; 32];
-    let hk = Hkdf::<Sha256>::new(Some(&initial_salt), &dcid);
-    hk.expand(&client_in, &mut client_initial_secret).unwrap();
-    println!("client_initial_secret: {client_initial_secret:02X?}");
+    Some((frame_type, offset, length, packet_data))
+}
 
-    let hk = Hkdf::<Sha256>::new(Some(&client_initial_secret), &[]);
-    let mut quic_hp_secret = [0; 16];
-    hk.expand(&quic_key, &mut quic_hp_secret).unwrap();
-    println!("quic_hp_secret: {quic_hp_secret:02X?}");
-
-    */
-
-    /*
-    let (key, header) = InitialKey::new_server(&dcid);
-    let mask = header.opening_header_protection_mask(sample);
-    println!("mask: {mask:02X?}");
-
-    let header = &mut payload.clone()[0..22];
-    header[0] ^= mask[0] & 0x0f;
-    header[18] ^= mask[1];
-    header[19] ^= mask[2];
-    header[20] ^= mask[3];
-    header[21] ^= mask[4];
-
-    println!("{header:02X?}");
-
-    let mut payload = &mut payload[22..];
-    key.decrypt(0, &header, &mut payload).unwrap();
-
-    println!("{payload:02X?}");
-    */
-
-    // test quic parsing
-    //let quic_packet = std::fs::read("/home/notpilif/Downloads/quic-initial.bin")?;
-    //let packet_header = PacketHeader::from_bytes(&quic_packet, 8)?;
-    //println!("{packet_header:?}");
-
+fn main() -> Result<()> {
+    let mut payload = hex::decode(std::fs::read_to_string("./encrypted-packet.txt")?.trim())?;
+    println!("{:02X?}", parse_quic_frame(&mut payload));
     Ok(())
 }
