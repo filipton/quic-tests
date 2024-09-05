@@ -204,9 +204,9 @@ dependencies = [
 
 [[package]]
 name = "qls-proto-utils"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eef7ed1f8a91729bbfd1b1e128f7ec2cd6fd0c5d1e64f86f66143e6b4c794439"
+checksum = "7359e5bc97ed9615e5395ab21840172f3e4f04ad6fd7d084061980185e0c5661"
 dependencies = [
  "aes",
  "aes-gcm",

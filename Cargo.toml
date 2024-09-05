@@ -5,4 +5,4 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.86"
-qls-proto-utils = "0.1.0"
+qls-proto-utils = "0.1.1"
