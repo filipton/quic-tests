@@ -5,4 +5,5 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.86"
-qls-proto-utils = "0.1.1"
+qls-proto-utils = "0.1.2"
+tokio = { version = "1.40.0", features = ["full"] }
