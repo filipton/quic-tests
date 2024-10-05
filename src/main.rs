@@ -7,6 +7,7 @@ use tokio::{
         mpsc::{unbounded_channel, UnboundedSender},
         RwLock,
     },
+    time::Instant,
 };
 
 #[tokio::main]
@@ -22,16 +23,15 @@ async fn main() -> Result<()> {
 
         let (tx, mut rx) = unbounded_channel();
         {
-            let mut tunnel_map = tunnel_map.write().await;
-            if let Some(sock) = tunnel_map.get(&addr) {
+            let mut tunnel_map_rw = tunnel_map.write().await;
+            if let Some(sock) = tunnel_map_rw.get(&addr) {
                 sock.send(recv_buf[..n].to_vec())?;
                 continue;
             } else {
-                tunnel_map.insert(addr, tx);
+                tunnel_map_rw.insert(addr, tx);
             }
         }
 
-        /*
         let quic_frame = parse_quic_payload(&recv_buf[..n]);
         //println!("quic_frame: {quic_frame:02X?}");
         if let Some(quic_frame) = quic_frame {
@@ -41,7 +41,6 @@ async fn main() -> Result<()> {
                 println!("{sni_res:?}");
             }
         }
-        */
 
         let listener = listener.clone();
         tokio::task::spawn(async move {
@@ -50,15 +49,26 @@ async fn main() -> Result<()> {
             local_sock.send(&recv_buf[..n]).await.unwrap();
 
             let mut recv_buf = [0; 65536];
+            let mut keep_alive = tokio::time::interval_at(
+                Instant::now() + Duration::from_secs(45),
+                Duration::from_secs(45),
+            );
+
             loop {
                 tokio::select! {
                     Some(res) = rx.recv() => {
+                        keep_alive.reset();
                         local_sock.send(&res).await.unwrap();
                     }
                     res = local_sock.recv(&mut recv_buf) => {
+                        keep_alive.reset();
                         //println!("{res:?}");
                         let n = res.unwrap();
                         listener.send_to(&recv_buf[..n], addr).await.unwrap();
+                    }
+                    _ = keep_alive.tick() => {
+                        println!("Keep alive drop");
+                        break;
                     }
                 }
             }
