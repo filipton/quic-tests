@@ -5,9 +5,8 @@ use tokio::{
     net::UdpSocket,
     sync::{
         mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
-        Notify, RwLock,
+        RwLock,
     },
-    time::{Instant, Interval},
 };
 
 #[tokio::main]
@@ -16,39 +15,14 @@ async fn main() -> Result<()> {
     let tunnel_map: TunnelMapTest = Arc::new(RwLock::new(HashMap::new()));
 
     let mut recv_buf = [0; 65536];
-    while let Ok((mut client, addr)) = server_test(&listener, &mut recv_buf, &tunnel_map).await {
+    while let Ok((client, addr)) = server_test(&listener, &mut recv_buf, &tunnel_map).await {
         //println!("new client: {addr:?}");
 
         let listener = listener.clone();
         tokio::task::spawn(async move {
-            let recv_buf = client.recv().await.unwrap();
-            let mut recv_buf_copy = recv_buf.clone();
-            let quic_header = qls_proto_utils::quic::parse_quic_header(&recv_buf_copy).unwrap();
-            //println!("qh: {quic_header:?}");
-            if quic_header.header_form != 1 || quic_header.packet_type != 0 {
-                println!("Not initial packet!");
-                return;
-            }
-
-            let quic_frame = parse_quic_payload(&mut recv_buf_copy);
-            //println!("quic_frame: {quic_frame:02X?}");
-            if let Some(quic_frame) = quic_frame {
-                if quic_frame.frame_type == 6 {
-                    //println!("INITIAL FRAME: {quic_frame:02X?}");
-                    let sni_res = parse_sni_inner(&quic_frame.decoded_data).unwrap_or("");
-                    println!("{sni_res:?}");
-                }
-            } else {
-                println!("no sni");
-                return;
-            }
-
-            let local_sock = UdpSocket::bind("0.0.0.0:0").await.unwrap();
-            local_sock.connect("127.0.0.1:443").await.unwrap();
-            local_sock.send(&recv_buf).await.unwrap();
-            let res = client.copy_bidirectional(&listener, local_sock).await;
+            let res = handle_client(client, addr, listener).await;
             if let Err(e) = res {
-                println!("client.copy_bidirectional err: {e:?}");
+                println!("handle_client_err: {e:?}");
             }
         });
     }
@@ -56,7 +30,48 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-type TunnelMapTest = Arc<RwLock<HashMap<SocketAddr, (Instant, UnboundedSender<Vec<u8>>)>>>;
+async fn handle_client(
+    mut client: UdpClient,
+    addr: SocketAddr,
+    listener: Arc<UdpSocket>,
+) -> Result<()> {
+    println!("handle_client: {addr}");
+
+    let recv_buf = client
+        .recv()
+        .await
+        .ok_or_else(|| anyhow::anyhow!("client_recv_err"))?;
+
+    let mut recv_buf_copy = recv_buf.clone();
+    let quic_header = qls_proto_utils::quic::parse_quic_header(&recv_buf_copy)
+        .ok_or_else(|| anyhow::anyhow!("Quic header parse error (bytes 0-5)"))?;
+
+    //println!("qh: {quic_header:?}");
+    if quic_header.header_form != 1 || quic_header.packet_type != 0 {
+        return Err(anyhow::anyhow!("Not an initial packet!"));
+    }
+
+    let quic_frame = parse_quic_payload(&mut recv_buf_copy);
+    //println!("quic_frame: {quic_frame:02X?}");
+    if let Some(quic_frame) = quic_frame {
+        if quic_frame.frame_type == 6 {
+            //println!("INITIAL FRAME: {quic_frame:02X?}");
+            let sni_res = parse_sni_inner(&quic_frame.decoded_data).unwrap_or("");
+            println!("{sni_res:?}");
+        }
+    } else {
+        return Err(anyhow::anyhow!("No sni in initial quic packet (tls)!"));
+    }
+
+    let local_sock = UdpSocket::bind("0.0.0.0:0").await?;
+    local_sock.connect("127.0.0.1:443").await?;
+    local_sock.send(&recv_buf).await?;
+    client.copy_bidirectional(&listener, local_sock).await?;
+
+    Ok(())
+}
+
+type TunnelMapTest = Arc<RwLock<HashMap<SocketAddr, UnboundedSender<Vec<u8>>>>>;
 async fn server_test(
     listener: &Arc<UdpSocket>,
     recv_buf: &mut [u8],
@@ -67,19 +82,20 @@ async fn server_test(
         let rx = {
             let mut tunnel_map_rw = tunnel_map.write().await;
             if let Some(sock) = tunnel_map_rw.get_mut(&addr) {
-                if (Instant::now() - sock.0).as_secs() > 45 || sock.1.is_closed() {
-                    println!("Keep alive drop!");
-                    tunnel_map_rw.remove(&addr);
-                    continue;
+                if sock.is_closed() {
+                    let (tx, rx) = unbounded_channel();
+                    *sock = tx;
+                    sock.send(recv_buf[..n].to_vec())?;
+
+                    return Ok((UdpClient::new(tunnel_map, rx, addr), addr));
                 }
 
-                sock.0 = Instant::now();
-                sock.1.send(recv_buf[..n].to_vec())?;
+                sock.send(recv_buf[..n].to_vec())?;
                 continue;
             } else {
                 let (tx, rx) = unbounded_channel();
                 tx.send(recv_buf[..n].to_vec())?;
-                tunnel_map_rw.insert(addr, (Instant::now(), tx));
+                tunnel_map_rw.insert(addr, tx);
 
                 rx
             }
