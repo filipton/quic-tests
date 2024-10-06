@@ -28,17 +28,32 @@ async fn main() -> Result<()> {
                 sock.send(recv_buf[..n].to_vec())?;
                 continue;
             } else {
-                tunnel_map_rw.insert(addr, tx);
-            }
-        }
+                let mut recv_buf_copy = recv_buf[..n].to_vec();
+                let quic_header = qls_proto_utils::quic::parse_quic_header(&recv_buf_copy).unwrap();
+                println!("qh: {quic_header:?}");
+                if quic_header.header_form != 1 || quic_header.packet_type != 0 {
+                    println!("Not initial packet!");
+                    continue;
+                }
 
-        let quic_frame = parse_quic_payload(&recv_buf[..n]);
-        //println!("quic_frame: {quic_frame:02X?}");
-        if let Some(quic_frame) = quic_frame {
-            if quic_frame.frame_type == 6 {
-                //println!("INITIAL FRAME: {quic_frame:02X?}");
-                let sni_res = parse_sni_inner(&quic_frame.decoded_data);
-                println!("{sni_res:?}");
+                let quic_frame = parse_quic_payload(&mut recv_buf_copy);
+                //println!("quic_frame: {quic_frame:02X?}");
+                if let Some(quic_frame) = quic_frame {
+                    if quic_frame.frame_type == 6 {
+                        //println!("INITIAL FRAME: {quic_frame:02X?}");
+                        let sni_res =
+                            parse_sni_inner(&quic_frame.decoded_data).unwrap_or("");
+                        println!("{sni_res:?}");
+
+                        // WARN: only allow for now one domain (for test)
+                        if sni_res == "testlocal.filipton.space" {
+                            tunnel_map_rw.insert(addr, tx);
+                        }
+                    }
+                } else {
+                    println!("no sni");
+                    continue;
+                }
             }
         }
 
