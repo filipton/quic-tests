@@ -17,14 +17,14 @@ async fn main() -> Result<()> {
 
     let mut recv_buf = [0; 65536];
     while let Ok((mut client, addr)) = server_test(&listener, &mut recv_buf, &tunnel_map).await {
-        println!("new client: {addr:?}");
+        //println!("new client: {addr:?}");
 
         let listener = listener.clone();
         tokio::task::spawn(async move {
             let recv_buf = client.recv().await.unwrap();
             let mut recv_buf_copy = recv_buf.clone();
             let quic_header = qls_proto_utils::quic::parse_quic_header(&recv_buf_copy).unwrap();
-            println!("qh: {quic_header:?}");
+            //println!("qh: {quic_header:?}");
             if quic_header.header_form != 1 || quic_header.packet_type != 0 {
                 println!("Not initial packet!");
                 return;
@@ -46,21 +46,9 @@ async fn main() -> Result<()> {
             let local_sock = UdpSocket::bind("0.0.0.0:0").await.unwrap();
             local_sock.connect("127.0.0.1:443").await.unwrap();
             local_sock.send(&recv_buf).await.unwrap();
-
-            let mut recv_buf = [0; 65536];
-            loop {
-                tokio::select! {
-                    res = client.recv() => {
-                        match res {
-                            Some(res) => local_sock.send(&res).await.unwrap(),
-                            None => break
-                        };
-                    }
-                    res = local_sock.recv(&mut recv_buf) => {
-                        let n = res.unwrap();
-                        listener.send_to(&recv_buf[..n], addr).await.unwrap();
-                    }
-                }
+            let res = client.copy_bidirectional(&listener, local_sock).await;
+            if let Err(e) = res {
+                println!("client.copy_bidirectional err: {e:?}");
             }
         });
     }
@@ -130,6 +118,30 @@ impl UdpClient {
                 None
             }
         }
+    }
+
+    pub async fn copy_bidirectional(
+        &mut self,
+        listener: &Arc<UdpSocket>,
+        sock: UdpSocket,
+    ) -> Result<()> {
+        let mut recv_buf = [0; 65536];
+        loop {
+            tokio::select! {
+                res = self.recv() => {
+                    match res {
+                        Some(res) => sock.send(&res).await?,
+                        None => break
+                    };
+                }
+                res = sock.recv(&mut recv_buf) => {
+                    let n = res?;
+                    listener.send_to(&recv_buf[..n], self.addr).await?;
+                }
+            }
+        }
+
+        Ok(())
     }
 
     async fn remove(&self) {
